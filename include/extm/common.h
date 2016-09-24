@@ -1,5 +1,6 @@
 #ifndef LIBEXTM_COMMON_HEADER_H
 #define LIBEXTM_COMMON_HEADER_H
+#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 
@@ -60,40 +61,42 @@ enum nyext_err_t
 #define LIBNANYC_ANYSTR_T
 typedef struct
 {
-	const char* cstr;
 	uint32_t size;
+	const char* c_str;
 }
 nyanystr_t;
 
-/*! Creat ean nyanystr_t from a c-string */
-static inline nyanystr_t nycstr(const char* text)
+/*! Create an nyanystr_t from a c-string */
+static inline nyanystr_t nyanystr(const char* const text)
 {
-	return nyanystr_t{text, strlen(text)};
+	nyanystr_t s = {((text) ? (uint32_t) strlen(text) : 0), text};
+	return s;
 }
 
-/*! Creat ean nyanystr_t from a c-string */
-static inline nyanystr_t nycstr(const char* text)
+/*! Create an nyanystr_t from a c-string and a given length */
+static inline nyanystr_t nyanystr_ex(const char* const text, uint32_t len)
 {
-	return nyanystr_t{text, strlen(text)};
+	nyanystr_t s = {len, text};
+	return s;
 }
 
-/*! Creat ean nyanystr_t from a c-string */
-static inline void nycstr_duplicate(nyanystr_t* out, const nyanystr_t* src)
+/*! Create an nyanystr_t from a reallocated c-string */
+static inline void nyanystr_duplicate(nyanystr_t* const out, const nyanystr_t* const src)
 {
-	uint32_t len = src->size;
-	const char* srcstr = src->cstr;
-	char* str = malloc(sizeof(char) * (len + 1));
-	memcpy(str, srcstr, len);
-	str[len] = '\0';
-	out->cstr = str;
-	out->size = len;
+    uint32_t len = src->size;
+    const char* srcstr = src->c_str;
+    char* str = (char*) malloc(sizeof(char) * (len + 1));
+    memcpy(str, srcstr, len);
+    str[len] = '\0';
+    out->c_str = str;
+    out->size = len;
 }
-
 #endif
 
 #ifndef LIBNANYC_NYBOOL_T
 #define LIBNANYC_NYBOOL_T
-enum nybool_t { nyfalse, nytrue };
+/*! Boolean type */
+typedef enum nybool_t {nyfalse = 0, nytrue} nybool_t;
 #endif
 
 #ifndef LIBNANYC_VERSION_T

@@ -5,50 +5,51 @@
 #include <vector>
 
 
+using NyObjMap   = std::unordered_map<std::string, nyobj_refptr_t>;
+using NyObjArray = std::vector<nyobj_refptr_t>;
 
-extern "C"
+
+enum class nyobj_internaltype_t: uint32_t
 {
-	enum class nyobj_internaltype_t: uint32_t
-	{
-		nyit_dict,
-		nyit_array,
-		nyit_shortstring,
-		nyit_string, // uintptr_t + char + zero-terminated
-		nyit_bool,
-		nyit_i32,
-		nyit_i64,
-		nyit_u32,
-		nyit_u64,
-		nyit_f32,
-		nyit_f64,
-		nyit_color,
-	};
+	nyit_dict,
+	nyit_array,
+	nyit_shortstring,
+	nyit_string, // uintptr_t + char + zero-terminated
+	nyit_bool,
+	nyit_i32,
+	nyit_i64,
+	nyit_u32,
+	nyit_u64,
+	nyit_f32,
+	nyit_f64,
+	nyit_color,
+};
 
-	union nyobj_value_t
-	{
-		uint64_t raw;
-		int32_t i32;
-		int64_t i64;
-		uint32_t u32;
-		uint64_t u64;
-		float f32;
-		double f64;
-		void* ptr;
-		uintptr_t* uintptr;
-		char* cstr;
-		char ncstr[8];
-		bool flag;
-		nycolor_t rgba;
-	};
 
-	struct nyobj_t
-	{
-		uint32_t refcount;
-		nyobj_internaltype_t type;
-		nyobj_value_t value;
-	};
+union nyobj_value_t
+{
+	uintptr_t raw;
+	int32_t i32;
+	int64_t i64;
+	uint32_t u32;
+	uint64_t u64;
+	float f32;
+	double f64;
+	bool onoff;
+	nycolor_t rgba;
+	NyObjMap* dict;
+	NyObjArray* array;
+	char shortstr[8];
+	uint32_t* string;
+};
 
-} // extern C
+
+struct nyobj_t
+{
+	uint32_t refcount;
+	nyobj_internaltype_t type;
+	nyobj_value_t value;
+};
 
 
 namespace // anonymous
@@ -100,19 +101,55 @@ namespace // anonymous
 	}; // class nyobj_refptr_t
 
 
-	using NyObjMap   = std::unordered_map<std::string, nyobj_refptr_t>;
-	using NyObjArray = std::vector<nyobj_refptr_t>;
 
-
-
-
-	inline nybool_t tobool_t(bool v)
+	template<class T>
+	inline T convert_to_number(const nyobj_t* const obj)
 	{
-		return v ? nytrue : nyfalse;
+		if (obj)
+		{
+			switch (obj->type)
+			{
+				case nyit_i32:  return static_cast<T>(obj->value.i32);
+				case nyit_i64:  return static_cast<T>(obj->value.i64);
+				case nyit_u32:  return static_cast<T>(obj->value.u32);
+				case nyit_u64:  return static_cast<T>(obj->value.u64);
+				case nyit_f32:  return static_cast<T>(obj->value.f32);
+				case nyit_f64:  return static_cast<T>(obj->value.f64);
+				case nyit_bool: return obj->value.onoff ? 1 : 0;
+				case nyit_color:return static_cast<T>(obj->value.rgba);
+				default: break;
+			}
+		}
+		return T();
 	}
 
 
-	nyobj_t* createobject(nyobj_internaltype_t type, nyobj_value_t value)
+	inline bool is_length_valid(size_t length)
+	{
+		return sizeof(size_t) == sizeof(uint32_t) || length < 2 * 1024 * 1024 * 1024;
+	}
+
+
+	inline uint32_t get_string_length(const nyobj_t* obj)
+	{
+		return *(obj->value.string);
+	}
+
+
+	inline size_t get_string_capacity(uint32_t length)
+	{
+		return sizeof(uint32_t)
+			* ((length + 1/*zero*/ + sizeof(uint32_t)/*strsize*/ + sizeof(uint32_t)/*round*/) / sizeof(uint32_t));
+	}
+
+
+	inline nybool_t to_nybool(bool value)
+	{
+		return value ? nytrue : nyfalse;
+	}
+
+
+	inline nyobj_t* nyobj_create_object(nyobj_internaltype_t type, nyobj_value_t value)
 	{
 		nyobj_t* const obj = (nyobj_t*) malloc(sizeof(nyobj_t));
 		if (obj)
@@ -125,51 +162,32 @@ namespace // anonymous
 	}
 
 
-	inline void delete_object_content(nyobj_t& obj)
+	inline void nyobj_delete_content(nyobj_t* const obj)
 	{
-		switch (obj.type)
+		switch (obj->type)
 		{
-			default:
-				break;
-			case nyit_string:
-			{
-				free(obj.value.ptr);
-				break;
-			}
-			case nyit_dict:
-			{
-				delete (reinterpret_cast<NyObjMap*>(obj.value.ptr));
-				break;
-			}
-			case nyit_array:
-			{
-				delete (reinterpret_cast<NyObjArray*>(obj.value.ptr));
-				break;
-			}
+			case nyit_string: free(obj->value.string); break;
+			case nyit_dict:   delete obj->value.dict; break;
+			case nyit_array:  delete obj->value.array; break;
+			default: break;
 		}
 	}
 
 
-	void delete_object(nyobj_t* object)
+	inline void delete_object(nyobj_t* object)
 	{
-		delete_object_content(*object);
+		nyobj_delete_content(object);
 		free(obj);
 	}
 
-	static inline void inline_nyobj_unref(nyobj_t* object)
+	inline void inline_nyobj_unref(nyobj_t* object)
 	{
 		if (object and 0 == --object->refcount)
-			delete_object(object);
+			nyobj_destroy_nocheck(object);
 	}
 
 
-	size_t get_string_buffer_size(const nyobj_t* const object)
-	{
-		return /*size*/ sizeof(uintptr_t) + /*string size*/ *(object->value.uintptr) + /*zero*/ 1u;
-	}
-
-
-	static inline bool nyobj_rawcopy_content(nyobj_t* dest, const nyobj_t* src)
+	bool nyobj_copy_content(nyobj_t* dest, const nyobj_t* src)
 	{
 		nyobj_internaltype_t type = src->type;
 		dest->type = type;
@@ -183,71 +201,67 @@ namespace // anonymous
 			}
 			case nyit_string:
 			{
-				size_t stringsize = get_string_buffer_size(dest);
-				char* p = (char*) malloc(size);
+				uint32_t length = get_string_length(src);
+				uint32_t* p = (uint32_t*) malloc(get_string_capacity(length));
 				if (!p)
 					return false;
-
-				dest->value.ptr = p;
-				char* src = src->value.cstr;
-				do { *p = *src; } while (size-- != 0);
+				dest->value.string = p;
+				memcpy(p, src->value.string, length + sizeof(uint32_t) + 1);
 				break;
 			}
 			case nyit_dict:
 			{
-				auto& dict = *reinterpret_cast<NyObjMap*>(rhs->value.ptr);
-				auto* newdict = new (std::nothrow) NyObjMap;
-				if (!newdict)
-					return false;
-				try
+				auto* dict = rhs->value.dict;
+				if (dict)
 				{
-					for (auto& pair: dict)
+					assert(not dict->empty());
+					std::unique_ptr<NyObjMap> newdict {new (std::nothrow) NyObjMap};
+					if (!newdict)
+						return false;
+					try
 					{
-						auto* clone = nyobj_clone(pair.second.object);
-						if (!clone)
+						for (auto& pair: *dict)
 						{
-							delete newdict;
-							return false;
+							auto* clone = nyobj_clone(pair.second.object);
+							if (!clone)
+								return false;
+							newdict->insert(std::make_pair<std::string, nyobj_refptr_t>(pair.first, clone));
+							--(clone->refcount);
 						}
-						newdict->insert(std::make_pair<std::string, nyobj_refptr_t>(pair.first, clone));
-						--(clone->refcount);
+						dest->value.dict = newdict.release();
 					}
-					dest->value.ptr = newdict;
+					catch (...) { return false; }
 				}
-				catch (...)
-				{
-					delete newdict;
-					return false;
-				}
+				else
+					dest->value.dict = nullptr;
 				break;
 			}
 			case nyit_array:
 			{
-				auto& array = *reinterpret_cast<NyObjArray*>(rhs->value.ptr);
-				auto* newarray = new (std::nothrow) NyObjArray;
-				if (!newarray)
-					return false;
-				try
+				auto* array = rhs->value.array;
+				if (array)
 				{
-					newarray->reserve(array.size());
-					for (auto& element: array)
+					assert(not array->empty());
+					std::unique_ptr<NyObjArray> newarray {new (std::nothrow) NyObjArray};
+					if (!newarray)
+						return false;
+					try
 					{
-						auto* clone = nyobj_clone(element.object);
-						if (!clone)
+						newarray->reserve(array->size());
+						for (auto& element: *array)
 						{
-							delete newarray;
-							return false;
+							auto* clone = nyobj_clone(element.object);
+							if (!clone)
+								return false;
+							newarray->emplace_back(clone);
+							--(clone->refcount);
 						}
-						newarray->emplace_back(clone);
-						--(clone->refcount);
+						dest->value.dict = newarray.release();
 					}
-					dest->value.ptr = newarray;
+					catch (...) { return false; }
 				}
-				catch (...)
-				{
-					delete newarray;
-					return false;
-				}
+				else
+					dest->value.dict = nullptr;
 				break;
 			}
 		}
@@ -255,7 +269,7 @@ namespace // anonymous
 	}
 
 
-	static inline nyobj_t* make_nyobj_str_ex(const char* cstr, uint32_t size)
+	nyobj_t* nyobj_create_from_cstring(const char* cstr, uint32_t size)
 	{
 		auto* object = (nyobj_t*) malloc(sizeof(nyobj_t));
 		if (!object)
@@ -265,23 +279,25 @@ namespace // anonymous
 		if (size < sizeof(uint64_t) - 1 /*string size*/) // shortstring optimization
 		{
 			object->type = nyit_shortstring;
-			object->value.ncstr[0] = static_cast<uint8_t>(size);
-			for (uint32_t i = 0; i != size; ++i)
-				object->value.ncstr[i + 1] = cstr[i];
-			object->value.ncstr[size + 1] = '\0';
+			char* p = object->value.ncstr;
+			*p = static_cast<uint8_t>(size);
+			++p;
+			for (uint32_t i = 0; i != size; ++i, ++p, ++cstr)
+				*p = *cstr;
+			*p = '\0';
 		}
 		else
 		{
-			size_t capacity = size + sizeof(uint64_t) + 1;
-			void* p = malloc(capacity);
+			uint32_t* p = (uint32_t*) malloc(get_string_capacity(size));
 			if (!p)
 			{
 				free(object);
 				return nullptr;
 			}
-			*reinterpret_cast<uint32_t*>(p) = size;
-			memcpy(p + sizeof(uint32_t), cstr, size);
-			p[size + 1 + sizeof(uint32_t)] = '\0';
+			*p = size;
+			p += 1;
+			memcpy(p, cstr, size);
+			reinterpret_cast<char*>(p)[size] = 0;
 			object->type = nyit_string;
 			object->value.ptr = p;
 		}
@@ -290,40 +306,76 @@ namespace // anonymous
 
 
 	template<class T, nyobj_t* (*Factory)(T)>
-	static inline nyobj_t* nyobj_build_array(const T* args, uint32_t count)
+	inline nyobj_t* nyobj_build_array(const T* args, uint32_t count)
 	{
 		if (count)
 		{
 			NyObjArray* array = new (std::nothrow) NyObjArray;
 			if (array)
 			{
-				nyobj_t* obj = createobject(nyit_array, array);
-				array->reserve(count);
-				for (uint32_t i = 0; i != count; ++i, ++args)
+				nyobj_t* obj = nyobj_create_object(nyit_array, array);
+				if (obj)
 				{
-					nyobj_t* obj = Factory(*args);
-					array->emplace_back(obj);
-					if (obj)
-						--(obj->refcount);
+					try
+					{
+						array->reserve(count);
+						for (uint32_t i = 0; i != count; ++i, ++args)
+						{
+							nyobj_t* obj = Factory(*args);
+							array->emplace_back(obj);
+							if (obj)
+								--(obj->refcount);
+						}
+						return obj;
+					}
+					catch (...)
+					{
+						nyobj_destroy_nocheck(obj);
+					}
 				}
-				return obj;
+				else
+					delete array;
 			}
 		}
-		return createobject(nyit_array, nullptr);
+		return nyobj_create_object(nyit_array, nullptr);
 	}
 
 
-	static inline NyObjArray* ensureAndFetchArray(nyobj_t* obj)
+	inline NyObjArray* ensure_array(nyobj_t* obj)
 	{
 		if (obj)
 		{
 			if (obj->type != nyit_array)
 				nyobj_mutate_to_array(obj);
-			auto* array = reinterpret_cast<NyObjArray*>(obj->value.ptr);
+
+			auto* array = obj->value.array;
 			if (!array)
 			{
-				array = new (std::nothrow)
+				array = new (std::nothrow) NyObjArray;
+				if (array)
+					obj->value.array = array;
 			}
+			return array;
+		}
+		return nullptr;
+	}
+
+
+	inline NyObjDict* ensure_dict(nyobj_t* obj)
+	{
+		if (obj)
+		{
+			if (obj->type != nyit_dict)
+				nyobj_mutate_to_dict(obj);
+
+			auto* dict = obj->value.dict;
+			if (!dict)
+			{
+				dict = new (std::nothrow) NyObjDict;
+				if (dict)
+					obj->value.dict = dict;
+			}
+			return dict;
 		}
 		return nullptr;
 	}
@@ -364,9 +416,21 @@ extern "C" nyobj_type_t nyobj_type(const nyobj_t* obj)
 }
 
 
+extern "C" void nyobj_destroy_nocheck(nyobj_t* obj)
+{
+	assert(obj != nullptr);
+	delete_object(object);
+}
+
+
 extern "C" void nyobj_unref(nyobj_t* obj)
 {
-	inline_nyobj_unref(obj);
+	if (obj)
+	{
+		assert(obj->refcount > 0);
+		if (!--(obj->refcount))
+			nyobj_destroy_nocheck(object);
+	}
 }
 
 
@@ -380,25 +444,23 @@ extern "C" nyobj_t* nyobj_clone(const nyobj_t* rhs)
 		return nullptr;
 
 	newobj->refcount = 1;
-	if (not nyobj_rawcopy_content(newobj, rhs))
-	{
-		free(newobj);
-		return nullptr;
-	}
-	return newobj;
+	if (nyobj_copy_content(newobj, rhs))
+		return newobj;
+	free(newobj);
+	return nullptr;
 }
 
 
 extern "C" void nyobj_copy(nyobj_t* dest, const nyobj_t* src)
 {
-	if (!dest)
-		return nullptr;
-
-	delete_object_content(dest);
-	if (!src or not nyobj_rawcopy_content(dest, src))
+	if (dest)
 	{
-		dest->type = nyit_u32;
-		dest->value.u32 = 0;
+		nyobj_delete_content(dest);
+		if (!src or not nyobj_copy_content(dest, src))
+		{
+			dest->type = nyit_u32;
+			dest->value.u32 = 0;
+		}
 	}
 }
 
@@ -418,75 +480,97 @@ extern "C" nyobj_t* nyobj_null()
 	return nullptr;
 }
 
+
 extern "C" nyobj_t* nyobj_nan()
 {
-	return createobject(nyit_f32, std::numeric_limits<float>::quiet_NaN());
+	return nyobj_create_object(nyit_f32, std::numeric_limits<float>::quiet_NaN());
 }
 
 
 extern "C" nyobj_t* nyobj_color(nycolor_t color)
 {
-	return createobject(nyit_color, color);
+	return nyobj_create_object(nyit_color, color);
 }
+
 
 extern "C" nyobj_t* nyobj_u64(uint64_t value)
 {
-	return createobject(nyit_u64, value);
+	return nyobj_create_object(nyit_u64, value);
 }
+
 
 extern "C" nyobj_t* nyobj_i64(int64_t value)
 {
-	return createobject(nyit_i64, value);
+	return nyobj_create_object(nyit_i64, value);
 }
+
 
 extern "C" nyobj_t* nyobj_u32(uint32_t value)
 {
-	return createobject(nyit_u32, value);
+	return nyobj_create_object(nyit_u32, value);
 }
+
 
 extern "C" nyobj_t* nyobj_i32(int32_t value)
 {
-	return createobject(nyit_i32, value);
+	return nyobj_create_object(nyit_i32, value);
 }
+
 
 extern "C" nyobj_t* nyobj_f32(float value)
 {
-	return createobject(nyit_f32, value);
+	return nyobj_create_object(nyit_f32, value);
 }
+
 
 extern "C" nyobj_t* nyobj_f64(double value)
 {
-	return createobject(nyit_f64, value);
+	return nyobj_create_object(nyit_f64, value);
 }
+
 
 extern "C" nyobj_t* nyobj_dict()
 {
-	return createobject(nyit_dict, nullptr);
+	return nyobj_create_object(nyit_dict, nullptr);
 }
 
-extern "C" nyobj_t* nyobj_array()
-{
-	return createobject(nyit_dict, nullptr);
-}
 
 extern "C" nyobj_t* nyobj_bool(int value)
 {
-	return createobject(nyit_bool, (value != 0));
+	return nyobj_create_object(nyit_bool, (value != 0));
+}
+
+
+extern "C" nyobj_t* nyobj_bool(nybool_t value)
+{
+	return nyobj_create_object(nyit_bool, (value != nyfalse));
+}
+
+
+extern "C" nyobj_t* nyobj_rgba(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+{
+	return nyobj_create_object(nyit_color, {r, g, b, a});
+}
+
+
+extern "C" nyobj_t* nyobj_rgb(uint8_t r, uint8_t g, uint8_t b)
+{
+	return nyobj_create_object(nyit_color, {r, g, b, 255u});
 }
 
 
 extern "C" nyobj_t* nyobj_str(const char* cstr)
 {
 	size_t length = (cstr) ? strlen(cstr) : 0;
-	return (length < 2 * 1024 * 1024 * 1024)
-		? make_nyobj_str_ex(cstr, static_cast<uint32_t>(length))
-		: nullptr;
+	return is_length_valid(length) ? nyobj_create_from_cstring(cstr, static_cast<uint32_t>(length)) : nullptr;
 }
+
 
 extern "C" nyobj_t* nyobj_str_ex(const char* cstr, uint32_t size)
 {
-	return make_nyobj_str_ex(cstr, size);
+	return nyobj_create_from_cstring(cstr, size);
 }
+
 
 extern "C" nyobj_t* nyobj_char(char c)
 {
@@ -494,7 +578,15 @@ extern "C" nyobj_t* nyobj_char(char c)
 	value.ncstr[0] = '\1'; // size in bytes
 	value.ncstr[1] = c;
 	value.ncstr[2] = '\0';
-	return createobject(nyit_shortstring, value);
+	return nyobj_create_object(nyit_shortstring, value);
+}
+
+
+
+
+extern "C" nyobj_t* nyobj_array()
+{
+	return nyobj_create_object(nyit_dict, nullptr);
 }
 
 
@@ -502,17 +594,30 @@ extern "C" nyobj_t* nyobj_array_of_obj(const nyobj_t** args, uint32_t count)
 {
 	if (count)
 	{
+		assert(args != nullptr);
 		NyObjArray* array = new (std::nothrow) NyObjArray;
 		if (array)
 		{
-			nyobj_t* obj = createobject(nyit_array, array);
-			array->reserve(count);
-			for (uint32_t i = 0; i != count; ++i, ++args)
-				array->emplace_back(*args);
-			return obj;
+			nyobj_t* obj = nyobj_create_object(nyit_array, array);
+			if (obj)
+			{
+				try
+				{
+					array->reserve(count);
+					for (uint32_t i = 0; i != count; ++i, ++args)
+						array->emplace_back(*args);
+					return obj;
+				}
+				catch (...)
+				{
+					nyobj_destroy_nocheck(obj);
+				}
+			}
+			else
+				delete array;
 		}
 	}
-	return createobject(nyit_array, nullptr);
+	return nyobj_create_object(nyit_array, nullptr);
 }
 
 
@@ -523,19 +628,31 @@ extern "C" nyobj_t* nyobj_array_of_clone_obj(const nyobj_t** args, uint32_t coun
 		NyObjArray* array = new (std::nothrow) NyObjArray;
 		if (array)
 		{
-			nyobj_t* obj = createobject(nyit_array, array);
-			array->reserve(count);
-			for (uint32_t i = 0; i != count; ++i, ++args)
+			nyobj_t* obj = nyobj_create_object(nyit_array, array);
+			if (obj)
 			{
-				nyobj_t* clone = nyobj_clone(*args);
-				array->emplace_back(clone);
-				if (clone)
-					--(clone->refcount);
+				try
+				{
+					array->reserve(count);
+					for (uint32_t i = 0; i != count; ++i, ++args)
+					{
+						nyobj_t* clone = nyobj_clone(*args);
+						array->emplace_back(clone);
+						if (clone)
+							--(clone->refcount);
+					}
+					return obj;
+				}
+				catch (...)
+				{
+					nyobj_destroy_nocheck(obj);
+				}
 			}
-			return obj;
+			else
+				delete array;
 		}
 	}
-	return createobject(nyit_array, nullptr);
+	return nyobj_create_object(nyit_array, nullptr);
 }
 
 
@@ -544,30 +661,36 @@ extern "C" nyobj_t* nyobj_array_of_strings(const char** args, uint32_t count)
 	return nyobj_build_array<const char*, nyobj_str>(args, count);
 }
 
+
 extern "C" nyobj_t* nyobj_array_of_i32(const int32_t* args, uint32_t count)
 {
 	return nyobj_build_array<int32_t, nyobj_i32>(args, count);
 }
+
 
 extern "C" nyobj_t* nyobj_array_of_u32(const uint32_t* args, uint32_t count)
 {
 	return nyobj_build_array<uint32_t, nyobj_u32>(args, count);
 }
 
+
 extern "C" nyobj_t* nyobj_array_of_i64(const int64_t* args, uint32_t count)
 {
 	return nyobj_build_array<int64_t, nyobj_i64>(args, count);
 }
+
 
 extern "C" nyobj_t* nyobj_array_of_u64(const uint64_t* args, uint32_t count)
 {
 	return nyobj_build_array<uint64_t, nyobj_u64>(args, count);
 }
 
+
 extern "C" nyobj_t* nyobj_array_of_f32(const float* args, uint32_t count)
 {
 	return nyobj_build_array<float, nyobj_f32>(args, count);
 }
+
 
 extern "C" nyobj_t* nyobj_array_of_f64(const double* args, uint32_t count)
 {
@@ -577,64 +700,21 @@ extern "C" nyobj_t* nyobj_array_of_f64(const double* args, uint32_t count)
 
 
 
-extern "C" nybool_t nyobj_is_i32(const nyobj_t* obj)
+extern "C" nybool_t nyobj_is_empty(const nyobj_t* obj)
 {
-	return tobool_t(obj and obj->type == nyit_i32);
-}
-
-extern "C" nybool_t nyobj_is_i64(const nyobj_t* obj)
-{
-	return tobool_t(obj and obj->type == nyit_i64);
-}
-
-extern "C" nybool_t nyobj_is_u32(const nyobj_t* obj)
-{
-	return tobool_t(obj and obj->type == nyit_u32);
-}
-
-extern "C" nybool_t nyobj_is_u64(const nyobj_t* obj)
-{
-	return tobool_t(obj and obj->type == nyit_u64);
-}
-
-extern "C" nybool_t nyobj_is_f32(const nyobj_t* obj)
-{
-	return tobool_t(obj and obj->type == nyit_f32);
-}
-
-extern "C" nybool_t nyobj_is_f64(const nyobj_t* obj)
-{
-	return tobool_t(obj and obj->type == nyit_f64);
-}
-
-extern "C" nybool_t nyobj_is_array(const nyobj_t* obj)
-{
-	return tobool_t(obj and obj->type == nyit_array);
-}
-
-extern "C" nybool_t nyobj_is_dict(const nyobj_t* obj)
-{
-	return tobool_t(obj and obj->type == nyit_dict);
-}
-
-extern "C" nybool_t nyobj_is_string(const nyobj_t* obj)
-{
-	return tobool_t(obj and (obj->type == nyit_shortstring or obj->type == nyit_string));
-}
-
-extern "C" nybool_t nyobj_is_color(const nyobj_t* obj)
-{
-	return tobool_t(obj and obj->type == nyit_color);
-}
-
-extern "C" nybool_t nyobj_is_rgb(const nyobj_t* obj)
-{
-	return tobool_t(obj and obj->type == nyit_color and obj->value.rgba[3] == 255);
-}
-
-extern "C" nybool_t nyobj_is_rgba(const nyobj_t* obj)
-{
-	return tobool_t(obj and obj->type == nyit_color and obj->value.rgba[3] != 255);
+	if (!obj)
+		return nytrue;
+	switch (obj->type)
+	{
+		case nyit_shortstring:
+			return (obj->value.ncstr[0] == 0); // nyit_string > few bytes for sure
+		case nyit_dict:
+		case nyit_array:
+			return (obj->value.ptr == nullptr);
+		default:
+			break;
+	}
+	return nyfalse;
 }
 
 
@@ -650,18 +730,18 @@ extern "C" uint32_t nyobj_size(const nyobj_t* obj)
 			}
 			case nyit_string:
 			{
-				return *(src->value.u32ptr);
+				return get_string_length(obj);
 			}
 			case nyit_dict:
 			{
-				if (obj->value.ptr)
-					return reinterpret_cast<NyObjMap*>(obj->value.ptr)->size();
+				if (obj->value.dict)
+					return obj->value.dict->size();
 				break;
 			}
 			case nyit_array:
 			{
-				if (obj->value.ptr)
-					return reinterpret_cast<NyObjArray*>(obj->value.ptr)->size();
+				if (obj->value.array)
+					return obj->value.array->size();
 				break;
 			}
 			default:
@@ -669,24 +749,6 @@ extern "C" uint32_t nyobj_size(const nyobj_t* obj)
 		}
 	}
 	return 0;
-}
-
-
-extern "C" nybool_t nyobj_is_empty(const nyobj_t* obj)
-{
-	if (!obj)
-		return nytrue;
-	switch (obj->type)
-	{
-		case nyit_shortstring:
-			return (obj->value.ncstr[0] == 0);
-		case nyit_dict:
-		case nyit_array:
-			return (obj->value.ptr == nullptr);
-		default:
-			break;
-	}
-	return nyfalse;
 }
 
 
@@ -700,17 +762,27 @@ extern "C" void nyobj_mutate_to_array(nyobj_t* obj)
 	{
 		case nyit_dict:
 		{
-			auto* dict = reinterpret_cast<NyObjMap*>(obj.value.ptr);
+			auto* dict = obj->value.dict;
 			if (dict)
 			{
 				newarray = new (std::nothrow) NyObjArray;
 				if (newarray)
 				{
-					newarray->reserve(dict->size());
-					for (auto& pair: *dict)
-						newarray->emplace_back(pair.second);
+					try
+					{
+						newarray->reserve(dict->size());
+						for (auto& pair: *dict)
+							newarray->emplace_back(pair.second);
+					}
+					catch (...)
+					{
+						delete newarray;
+						newarray = nullptr;
+						delete dict;
+					}
 				}
-				delete dict;
+				else
+					delete dict;
 			}
 			break;
 		}
@@ -725,11 +797,22 @@ extern "C" void nyobj_mutate_to_array(nyobj_t* obj)
 					firstitem->refcount = 0;
 					firstitem->type = obj->type;
 					firstitem->value = obj->value;
-					newarray->emplace_back(firstitem);
-					break;
+					try
+					{
+						newarray->emplace_back(firstitem);
+					}
+					catch (...)
+					{
+						free(firstitem);
+						delete newarray;
+						newarray = nullptr;
+					}
 				}
-				delete newarray;
-				newarray = nullptr;
+				else
+				{
+					delete newarray;
+					newarray = nullptr;
+				}
 			}
 			break;
 		}
@@ -749,17 +832,27 @@ extern "C" void nyobj_mutate_to_dict(nyobj_t* obj)
 	{
 		case nyit_array:
 		{
-			auto* array = reinterpret_cast<NyObjArray*>(obj.value.ptr);
+			auto* array = obj->value.array;
 			if (array)
 			{
 				newdict = new (std::nothrow) NyObjMap;
 				if (newdict)
 				{
 					uint32_t i = 0;
-					for (auto& element: *array)
-						newdict->insert(std::make_pair(to_string(i++), element));
+					try
+					{
+						for (auto& element: *array)
+							newdict->insert(std::make_pair(std::to_string(i++), element));
+					}
+					catch (...)
+					{
+						delete newdict;
+						newdict = nullptr;
+						delete array;
+					}
 				}
-				delete array;
+				else
+					delete array;
 			}
 			break;
 		}
@@ -774,11 +867,13 @@ extern "C" void nyobj_mutate_to_dict(nyobj_t* obj)
 					firstitem->refcount = 0;
 					firstitem->type = obj->type;
 					firstitem->value = obj->value;
-					newdict->insert(std::make_pair("_", firstitem));
-					break;
+					newdict->insert(std::make_pair(std::string{"_"}, firstitem));
 				}
-				delete newdict;
-				newdict = nullptr;
+				else
+				{
+					delete newdict;
+					newdict = nullptr;
+				}
 			}
 			break;
 		}
@@ -788,77 +883,75 @@ extern "C" void nyobj_mutate_to_dict(nyobj_t* obj)
 }
 
 
-extern "C" void nyobj_array_add(nyobj_t* array, nyobj_t* obj)
+extern "C" void nyobj_clear(nyobj_t* obj)
 {
-	if (array)
+	if (obj and obj->value.raw != 0)
 	{
-		if (array->type != nyit_array)
-			nyobj_mutate_to_array(array);
-
-		auto* array = reinterpret_cast<NyObjArray*>(rhs->value.ptr);
-		if (array)
-			array->emplace_back(obj);
-	}
-}
-
-
-extern "C" void nyobj_array_reserve(nyobj_t* array, uint32_t count)
-{
-	if (array)
-	{
-		if (array->type != nyit_array)
-			nyobj_mutate_to_array(array);
-
-		auto* array = reinterpret_cast<NyObjArray*>(rhs->value.ptr);
-		if (array)
-			array->reserve(count);
-	}
-}
-
-
-extern "C" void nyobj_array_set(nyobj_t* array, uint32_t index, nyobj_t* obj)
-{
-	if (array)
-	{
-		if (array->type != nyit_array)
-			nyobj_mutate_to_array(array);
-
-		auto* array = reinterpret_cast<NyObjArray*>(rhs->value.ptr);
-		if (array)
+		switch (obj->type)
 		{
-			if (index < array->size())
+			case nyit_string:
 			{
-				(*index)[index] = obj;
+				free(obj->value.string);
+				obj->type = nyit_shortstring;
+				break;
 			}
-			else
+			case nyit_dict:
 			{
-				array->resize(index);
-				array->emplace_back(obj);
+				delete obj->value.dict;
+				break;
 			}
+			case nyit_array:
+			{
+				delete obj->value.array;
+				break;
+			}
+			default:
+				break;
 		}
+		obj->value.raw = 0;
 	}
 }
 
 
-extern "C" void nyobj_array_clear(nyobj_t* array)
+extern "C" nybool_t nyobj_append(nyobj_t* obj, nyobj_t* item)
 {
+	auto* array = ensure_array(obj);
 	if (array)
 	{
-		if (array->type != nyit_array)
-			nyobj_mutate_to_array(array);
-
-		auto* array = reinterpret_cast<NyObjArray*>(rhs->value.ptr);
-		if (array)
-			array->clear();
+		try
+		{
+			array->emplace_back(item);
+			return nytrue;
+		}
+		catch (...) {}
 	}
+	return nyfalse;
 }
 
 
-extern "C" nyobj_t* nyobj_array_set(nyobj_t* array, uint32_t index)
+extern "C" nybool_t nyobj_set_index(nyobj_t* obj, uint32_t index, nyobj_t* item)
 {
-	if (array and array->type == nyit_array)
+	auto* array = ensure_array(obj);
+	if (array)
 	{
-		auto* array = reinterpret_cast<NyObjArray*>(rhs->value.ptr);
+		try
+		{
+			if (not (index < array->size()))
+				array->resize(index + 1);
+			(*array)[index] = item;
+			return nytrue;
+		}
+		catch (...) {}
+	}
+	return nyfalse;
+}
+
+
+extern "C" nyobj_t* nyobj_get_index(nyobj_t* obj, uint32_t index)
+{
+	if (obj and obj->type == nyit_array)
+	{
+		auto* array = obj->value.array;
 		if (array and index < array->size())
 			return (*array)[index].object;
 	}
@@ -866,107 +959,148 @@ extern "C" nyobj_t* nyobj_array_set(nyobj_t* array, uint32_t index)
 }
 
 
-extern "C" nyobj_t* nyobj_get(nyobj_t* obj, const char* key)
+extern "C" nyobj_t* nyobj_get_ex(nyobj_t* obj, const char* key, uint32_t length)
 {
-	if (obj and obj->type == nyit_dict)
+	if (obj and key and length < 65536 and obj->type == nyit_dict)
 	{
-		auto* dict = reinterpret_cast<NyObjMap*>(obj.value.ptr);
-		auto it = dict->find(key);
-		if (it != dict->end())
-			return it->second.object;
-	}
-	return nullptr;
-}
-
-extern "C" nyobj_t* nyobj_get_ex(nyobj_t* obj, const char* key, uint32_t keylen)
-{
-	if (obj and obj->type == nyit_dict)
-	{
-		auto* dict = reinterpret_cast<NyObjMap*>(obj.value.ptr);
-		auto it = dict->find(std::string{key, keylen});
-		if (it != dict->end())
-			return it->second.object;
+		auto* dict = obj->value.dict;
+		if (dict)
+		{
+			auto it = dict->find(std::string{key, length});
+			if (it != dict->end())
+				return it->second.object;
+		}
 	}
 	return nullptr;
 }
 
 
-extern "C" nyobj_t* nyobj_erase(nyobj_t* obj, const char* key)
+extern "C" nybool_t nyobj_set_ex(nyobj_t* obj, const char* key, uint32_t length, nyobj_t* item)
 {
-	if (obj and obj->type == nyit_dict)
+	if (key and length < 65536)
 	{
-		auto* dict = reinterpret_cast<NyObjMap*>(obj.value.ptr);
-		dict->erase(key);
+		auto* dict = ensure_dict(obj);
+		if (dict)
+		{
+			try
+			{
+				(*dict)[std::string{key, length}] = item;
+				return nytrue;
+			}
+			catch (...) {}
+		}
 	}
+	return nyfalse;
 }
 
-extern "C" nyobj_t* nyobj_erase_ex(nyobj_t* obj, const char* key, uint32_t keylen)
+
+extern "C" nyobj_t* nyobj_erase_ex(nyobj_t* obj, const char* key, uint32_t length)
 {
-	if (obj and obj->type == nyit_dict)
+	if (obj and key and length < 65536 and obj->type == nyit_dict)
 	{
-		auto* dict = reinterpret_cast<NyObjMap*>(obj.value.ptr);
-		dict->erase(std::string{key, keylen});
+		auto* dict = obj->value.dict;
+		if (dict)
+		{
+			auto count = dict->erase(std::string{key, length});
+			return to_nybool(count != 0);
+		}
 	}
+	return nullptr;
 }
 
-extern "C" nyobj_t* nyobj_set(nyobj_t* obj, const char* key, nyobj_t* value)
+
+extern "C" int32_t nyobj_as_i32(const nyobj_t* obj)
+{
+	return convert_to_number<int32_t>(obj);
+}
+
+extern "C" int64_t nyobj_as_i64(const nyobj_t* obj)
+{
+	return convert_to_number<int64_t>(obj);
+}
+
+extern "C" uint32_t nyobj_as_u32(const nyobj_t* obj)
+{
+	return convert_to_number<uint32_t>(obj);
+}
+
+extern "C" uint64_t nyobj_as_u64(const nyobj_t* obj)
+{
+	return convert_to_number<uint64_t>(obj);
+}
+
+extern "C" float nyobj_as_f32(const nyobj_t* obj)
+{
+	return convert_to_number<float>(obj);
+}
+
+extern "C" double nyobj_as_f64(const nyobj_t* obj)
+{
+	return convert_to_number<double>(obj);
+}
+
+extern "C" nybool_t nyobj_as_bool(const nyobj_t* obj)
 {
 	if (obj)
 	{
-		if (obj->type != nyit_dict)
-			nyobj_mutate_to_dict(obj);
-
-		auto* dict = reinterpret_cast<NyObjMap*>(obj.value.ptr);
-		if (dict)
+		switch (obj->type)
 		{
-			std::string sk{key, keylen};
-			auto it = dict->find(sk);
-			if (it != dict->end())
-				it->second = value;
-			else
-				dict->insert(std::make_pair(std::string{sk}, nyobj_refptr_t{value}));
+			case nyit_i32:  return to_nybool(obj->value.i32 != 0);
+			case nyit_i64:  return to_nybool(obj->value.i64 != 0);
+			case nyit_u32:  return to_nybool(obj->value.u32 != 0);
+			case nyit_u64:  return to_nybool(obj->value.u64 != 0);
+			case nyit_f32:  return to_nybool(obj->value.f32 != 0);
+			case nyit_f64:  return to_nybool(obj->value.f64 != 0);
+			case nyit_bool: return to_nybool(obj->value.onoff);
+			default: break;
 		}
 	}
+	return nyfalse;
 }
 
-extern "C" nyobj_t* nyobj_set_ex(nyobj_t* obj, const char* key, uint32_t keylen, nyobj_t* value)
+
+extern "C" const char* nyobj_as_str_ex(const nyobj_t* obj, uint32_t* len)
 {
 	if (obj)
 	{
-		if (obj->type != nyit_dict)
-			nyobj_mutate_to_dict(obj);
-
-		auto* dict = reinterpret_cast<NyObjMap*>(obj.value.ptr);
-		if (dict)
+		switch (obj->type)
 		{
-			std::string sk{key, keylen};
-			auto it = dict->find(sk);
-			if (it != dict->end())
-				it->second = value;
-			else
-				dict->insert(std::make_pair(std::string{sk}, nyobj_refptr_t{value}));
+			case nyit_shortstring: *len = obj->value.shortstr[0]; return &(obj->value.shortstr[1]);
+			case nyit_string: *len = get_string_size(obj); return (const char*)(obj->value.string + 1);
+			default: break;
 		}
 	}
-}
-
-
-extern "C" void nyobj_dict_clear(nyobj_t* dict)
-{
-	if (dict)
-	{
-		if (array->type != nyit_dict)
-			nyobj_mutate_to_dict(dict);
-
-		auto* dict = reinterpret_cast<NyObjMap*>(rhs->value.ptr);
-		if (dict)
-			dict->clear();
-	}
+	*len = 0;
+	return "";
 }
 
 
 extern "C" nycolor_t nyobj_as_color(const nyobj_t* obj)
 {
-	return (obj and obj->type == nyit_color)
-		? obj->value.color
-		: {0,0,0, 255};
+	if (obj)
+	{
+		switch (obj->type)
+		{
+			case nyit_color:
+				return obj->value.rgba;
+			case nyit_u32:
+				return static_cast<nycolor_t>(obj->value.u32);
+			default:
+				break;
+		}
+	}
+	return {0,0,0, 255};
 }
+
+
+
+/* ------------------------------------------------------------------------------- */
+
+
+
+
+
+
+
+
+

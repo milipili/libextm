@@ -1,7 +1,8 @@
-#include <nyextm/nyextm.h>
-#include <stdlib.h>
+#include "extm/common.h"
+#include "extm/object.h" /* to test header compilation */
 #include <string.h>
 #include <assert.h>
+#include <limits.h>
 
 
 
@@ -30,7 +31,7 @@ void nystrarray_set(char** list, uint32_t index, const char* str)
 	if (list)
 	{
 		size_t slen = (str ? strlen(str) : 0);
-		uint32_t len = (slen < UINT_MAX - 1) ? static_cast<uint32_t>(slen) : (UINT_MAX - 1);
+		uint32_t len = (slen < UINT_MAX - 1) ? (uint32_t) slen : (UINT_MAX - 1);
 		char* newelem = (char*) malloc(sizeof(char) * (len + 1));
 		memcpy(newelem, str, sizeof(char) * len);
 		newelem[len] = '\0';
@@ -44,7 +45,7 @@ void nystrarray_set_ex(char** list, uint32_t index, const char* str, uint32_t le
 {
 	if (list)
 	{
-		assert(len == 0 or str != NULL);
+		assert(len == 0 || str != NULL);
 		char* newelem = (char*) malloc(sizeof(char) * (len + 1));
 		memcpy(newelem, str, sizeof(char) * len);
 		newelem[len] = '\0';
